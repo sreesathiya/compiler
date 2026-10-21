@@ -1,56 +1,102 @@
-COMPILER FRONT END + CODE MOTION + BACK END
-=============================================
+COMPILER DESIGN LAB — COMPLETE ANSWER (METHOD 1: SIMPLE EXAM METHOD)
+=====================================================================
 
-Simplest exam version using FLEX (LEX) + BISON (YACC) + C.
-Save the three source files separately as compiler.l, compiler.y, and backend.c.
-This text file also includes sample input, expected output, compile commands, and viva questions.
+QUESTION
+--------
+Develop a front end of a compiler by generating intermediate code in the form of
+three-address code (TAC) for the sample program using looping and assignment
+statements. Optimize the generated intermediate code using code motion. Develop
+a back end for an assignment statement.
 
-NOTE:
-- The parser generates three-address code (TAC).
-- Code motion is demonstrated as a simple, explicit optimization pass for this sample.
-- The back end translates the optimized TAC into illustrative register-machine assembly.
-- The target instructions are educational pseudo-assembly, not instructions for a specific CPU.
+INPUT PROGRAM
+-------------
+while (m < n * 4)
+{
+    r = 16 * 5;
+    s = x * y + z;
+    t = m + s;
+}
 
+IMPORTANT
+---------
+This answer uses a simple, multi-file implementation. The compiler generates
+TAC from the input; optimizer.c reads that generated TAC and writes optimized
+TAC; codegen.c reads the optimized TAC and produces assembly-like target code.
+The target code is educational pseudo-assembly, not machine-specific assembly.
 
-FILE 1: compiler.l  (LEX SPECIFICATION)
----------------------------------------
+FOLDER SETUP
+------------
+Create a folder named:
+    compiler_lab
+
+Save all six files listed below inside that same folder:
+    lex.l
+    parser.y
+    optimizer.c
+    codegen.c
+    input.txt
+    (the generated files tac.txt, optimized.txt, target.txt will appear after running)
+
+PART (a) — LEX SPECIFICATION TO IDENTIFY TOKENS
+==============================================
+
+FILE NAME: lex.l
+SAVE LOCATION: compiler_lab/lex.l
+
+CODE
+----
+%option noyywrap
+
 %{
-#include "compiler.tab.h"
+#include "parser.tab.h"
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 %}
 
 %%
 "while"                 { return WHILE; }
-"if"                    { return IF; }
-"else"                  { return ELSE; }
 [0-9]+                  { yylval.str = strdup(yytext); return NUMBER; }
 [a-zA-Z_][a-zA-Z0-9_]*  { yylval.str = strdup(yytext); return ID; }
-"=="                    { return EQ; }
-"!="                    { return NE; }
-"<="                    { return LE; }
-">="                    { return GE; }
+
 "<"                     { return LT; }
-">"                     { return GT; }
 "="                     { return ASSIGN; }
 "+"                     { return PLUS; }
 "-"                     { return MINUS; }
 "*"                     { return MUL; }
 "/"                     { return DIV; }
+
 "("                     { return '('; }
 ")"                     { return ')'; }
 "{"                     { return '{'; }
 "}"                     { return '}'; }
 ";"                     { return ';'; }
+
 [ \t\r\n]+              ;
-.                       { printf("Invalid character: %s\n", yytext); }
+.                       { fprintf(stderr, "Invalid character: %s\n", yytext); }
 %%
 
-int yywrap(void) { return 1; }
+EXPLANATION
+-----------
+LEX reads the source program and recognizes tokens.
+- "while" is returned as WHILE.
+- [0-9]+ recognizes integer numbers such as 4 and 16.
+- [a-zA-Z_][a-zA-Z0-9_]* recognizes identifiers such as m, total, and x1.
+- Operators such as <, =, +, -, *, / are recognized.
+- Parentheses, braces, and semicolons are returned as character tokens.
+- Spaces and newlines are ignored.
+- Any unrecognized character is reported as invalid.
 
+LEX does not check the complete grammar. It sends tokens to YACC/Bison.
 
-FILE 2: compiler.y  (YACC/BISON SPECIFICATION + SDT)
-----------------------------------------------------
+PART (b) AND (c) — YACC SYNTAX CHECKING AND TAC GENERATION
+=========================================================
+
+FILE NAME: parser.y
+SAVE LOCATION: compiler_lab/parser.y
+
+CODE
+----
 %{
 #include <stdio.h>
 #include <stdlib.h>
@@ -59,215 +105,399 @@ FILE 2: compiler.y  (YACC/BISON SPECIFICATION + SDT)
 int yylex(void);
 void yyerror(const char *s);
 
-typedef struct {
-    char text[32];
-} Attr;
+FILE *tac_file;
+int temp_count = 0;
 
-static char tac[300][128];
-static int tacCount = 0;
-static int tempCount = 0;
-static int labelCount = 0;
-static int loopStart = -1;
-static int loopEnd = -1;
-
-static char *newtemp(void) {
-    static char names[200][16];
-    snprintf(names[tempCount], sizeof(names[tempCount]), "t%d", tempCount + 1);
-    return names[tempCount++];
+char *new_temp(void)
+{
+    char buffer[32];
+    snprintf(buffer, sizeof(buffer), "t%d", ++temp_count);
+    return strdup(buffer);
 }
 
-static int newlabel(void) { return ++labelCount; }
-
-static void emit(const char *s) {
-    if (tacCount < 300) snprintf(tac[tacCount++], sizeof(tac[0]), "%s", s);
+void emit(const char *line)
+{
+    fprintf(tac_file, "%s\n", line);
 }
-
-static void emitLabel(int n) {
-    char b[64]; snprintf(b, sizeof(b), "L%d:", n); emit(b);
-}
-
-static void emitBinary(const char *a, const char *op, const char *b, char *out) {
-    char *t = newtemp();
-    char line[128];
-    snprintf(line, sizeof(line), "%s = %s %s %s", t, a, op, b);
-    emit(line);
-    strcpy(out, t);
-}
-
-static void printTAC(void) {
-    int i;
-    printf("\nTHREE-ADDRESS CODE (TAC)\n");
-    for (i = 0; i < tacCount; i++) printf("%2d. %s\n", i + 1, tac[i]);
-}
-
-static void optimizeAndPrint(void) {
-    /*
-      For this exact sample, the loop-invariant expressions are:
-          n * 4       (the value of n is not changed in the loop)
-          16 * 5      (constant expression)
-      Move them before the loop label. Keep x*y+z and m+s in the loop,
-      because their values may change when m changes / on each iteration.
-      This sample-specific pass is deliberately kept simple for exam use.
-    */
-    printf("\nOPTIMIZED TAC (CODE MOTION + CONSTANT FOLDING)\n");
-    printf(" 1. t1 = n * 4\n");
-    printf(" 2. t2 = 16 * 5\n");
-    printf(" 3. L1:\n");
-    printf(" 4. ifFalse m < t1 goto L2\n");
-    printf(" 5. s = x * y + z\n");
-    printf(" 6. t = m + s\n");
-    printf(" 7. goto L1\n");
-    printf(" 8. L2:\n");
-    printf("\nFurther constant folding can replace t2 = 16 * 5 with t2 = 80.\n");
-}
-
-static void printTarget(void) {
-    printf("\nTARGET CODE (ILLUSTRATIVE PSEUDO-ASSEMBLY)\n");
-    printf("MOV R1, n\n");
-    printf("MUL R1, #4\n");
-    printf("MOV R2, R1          ; R2 holds n*4 (loop invariant)\n");
-    printf("MOV R3, #80          ; 16*5 folded at compile time\n");
-    printf("L1:\n");
-    printf("MOV R4, m\n");
-    printf("CMP R4, R2\n");
-    printf("JGE L2               ; if m >= n*4, exit (for integer values)\n");
-    printf("MOV R5, x\n");
-    printf("MUL R5, y\n");
-    printf("ADD R5, z\n");
-    printf("MOV s, R5\n");
-    printf("MOV R6, m\n");
-    printf("ADD R6, s\n");
-    printf("MOV t, R6\n");
-    printf("JMP L1\n");
-    printf("L2:\n");
-}
-
 %}
 
 %union {
     char *str;
 }
 
-%token WHILE IF ELSE
+%token WHILE LT ASSIGN PLUS MINUS MUL DIV
 %token <str> ID NUMBER
-%token ASSIGN PLUS MINUS MUL DIV
-%token LT GT LE GE EQ NE
 %type <str> expr
+
 %left PLUS MINUS
 %left MUL DIV
-%right UMINUS
 
 %%
 
 program
-    : stmt
+    : while_stmt
+    ;
+
+while_stmt
+    : WHILE '('
+      { emit("L1:"); }
+      expr LT expr ')'
       {
-          printf("Syntax is correct.\n");
-          printTAC();
-          optimizeAndPrint();
-          printTarget();
+          char line[256];
+          snprintf(line, sizeof(line),
+                   "ifFalse %s < %s goto L2", $4, $6);
+          emit(line);
+      }
+      '{' stmt_list '}'
+      {
+          emit("goto L1");
+          emit("L2:");
       }
     ;
 
-stmt
-    : assignment
-    | while_stmt
-    | '{' stmt_list '}'
-    ;
-
 stmt_list
-    : /* empty */
-    | stmt_list stmt
+    : stmt_list stmt
+    | stmt
     ;
 
-assignment
+stmt
     : ID ASSIGN expr ';'
       {
-          char line[128];
+          char line[256];
           snprintf(line, sizeof(line), "%s = %s", $1, $3);
           emit(line);
       }
     ;
 
-while_stmt
-    : WHILE '('
-      {
-          loopStart = newlabel();
-          emitLabel(loopStart);
-      }
-      expr LT expr ')'
-      {
-          loopEnd = newlabel();
-          char line[128];
-          snprintf(line, sizeof(line), "ifFalse %s < %s goto L%d", $4, $6, loopEnd);
-          emit(line);
-      }
-      '{' stmt_list '}'
-      {
-          char line[64];
-          snprintf(line, sizeof(line), "goto L%d", loopStart);
-          emit(line);
-          emitLabel(loopEnd);
-      }
-    ;
-
 expr
-    : expr PLUS expr
+    : ID
+      { $$ = strdup($1); }
+    | NUMBER
+      { $$ = strdup($1); }
+    | expr PLUS expr
       {
-          $$ = malloc(32); emitBinary($1, "+", $3, $$);
+          char *t = new_temp();
+          char line[256];
+          snprintf(line, sizeof(line), "%s = %s + %s", t, $1, $3);
+          emit(line);
+          $$ = t;
       }
     | expr MINUS expr
       {
-          $$ = malloc(32); emitBinary($1, "-", $3, $$);
+          char *t = new_temp();
+          char line[256];
+          snprintf(line, sizeof(line), "%s = %s - %s", t, $1, $3);
+          emit(line);
+          $$ = t;
       }
     | expr MUL expr
       {
-          $$ = malloc(32); emitBinary($1, "*", $3, $$);
+          char *t = new_temp();
+          char line[256];
+          snprintf(line, sizeof(line), "%s = %s * %s", t, $1, $3);
+          emit(line);
+          $$ = t;
       }
     | expr DIV expr
       {
-          $$ = malloc(32); emitBinary($1, "/", $3, $$);
+          char *t = new_temp();
+          char line[256];
+          snprintf(line, sizeof(line), "%s = %s / %s", t, $1, $3);
+          emit(line);
+          $$ = t;
       }
-    | '(' expr ')' { $$ = $2; }
-    | ID           { $$ = $1; }
-    | NUMBER       { $$ = $1; }
     ;
 
 %%
 
-void yyerror(const char *s) {
+void yyerror(const char *s)
+{
     fprintf(stderr, "Syntax error: %s\n", s);
 }
 
-int main(void) {
-    printf("Enter source program, then press Ctrl+D (Linux/macOS) or Ctrl+Z then Enter (Windows):\n");
-    return yyparse();
+int main(void)
+{
+    tac_file = fopen("tac.txt", "w");
+    if (tac_file == NULL) {
+        perror("Could not create tac.txt");
+        return 1;
+    }
+
+    int result = yyparse();
+    fclose(tac_file);
+
+    if (result == 0) {
+        printf("Syntax is valid. TAC generated in tac.txt\n");
+        return 0;
+    }
+    return 1;
 }
 
+NOTE ABOUT THIS GRAMMAR
+----------------------
+The grammar supports the sample assignment and while-loop form in this
+question. The loop label is emitted before the condition is parsed, so the
+raw TAC places the condition calculation after L1. Part (d) moves that
+loop-invariant calculation before L1. Operator precedence makes * and / bind
+more tightly than + and -.
 
-FILE 3: backend.c  (OPTIONAL STANDALONE BACK-END EXAMPLE)
----------------------------------------------------------
-/*
-This tiny standalone example demonstrates the back end for an assignment:
-    a = b * c + d;
-Compile with: gcc backend.c -o backend
-Run: ./backend
-*/
+PART (d) — OPTIMIZATION USING CODE MOTION
+=========================================
+
+FILE NAME: optimizer.c
+SAVE LOCATION: compiler_lab/optimizer.c
+
+CODE
+----
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <ctype.h>
 
-int main(void) {
-    printf("Assignment: a = b * c + d\n");
-    printf("Target code:\n");
-    printf("MOV R1, b\n");
-    printf("MUL R1, c\n");
-    printf("ADD R1, d\n");
-    printf("MOV a, R1\n");
+/* Simple exam optimizer:
+   1. Moves the condition calculation(s) between L1 and ifFalse to before L1.
+   2. Folds integer-only +, -, *, / operations.
+   This is intentionally a small teaching optimizer for the sample grammar. */
+
+#define MAX_LINES 500
+#define LINE_LEN 256
+
+static int is_label(const char *s)
+{
+    return (s[0] == 'L' && strchr(s, ':') != NULL);
+}
+
+static int constant_fold(char *line)
+{
+    char lhs[64], a[64], op[8], b[64], extra[8];
+    long x, y, result;
+    char *eq = strchr(line, '=');
+    if (!eq) return 0;
+
+    if (sscanf(eq + 1, " %63s %7s %63s %7s", a, op, b, extra) != 3)
+        return 0;
+
+    char *end1, *end2;
+    x = strtol(a, &end1, 10);
+    y = strtol(b, &end2, 10);
+    if (*a == '\0' || *b == '\0' || *end1 != '\0' || *end2 != '\0')
+        return 0;
+
+    if (strcmp(op, "+") == 0) result = x + y;
+    else if (strcmp(op, "-") == 0) result = x - y;
+    else if (strcmp(op, "*") == 0) result = x * y;
+    else if (strcmp(op, "/") == 0) {
+        if (y == 0) return 0;
+        result = x / y;
+    } else return 0;
+
+    size_t lhs_len = (size_t)(eq - line);
+    if (lhs_len >= sizeof(lhs)) return 0;
+    memcpy(lhs, line, lhs_len);
+    lhs[lhs_len] = '\0';
+
+    snprintf(line, LINE_LEN, "%s= %ld", lhs, result);
+    return 1;
+}
+
+int main(void)
+{
+    FILE *in = fopen("tac.txt", "r");
+    if (!in) {
+        perror("Could not open tac.txt; run the compiler first");
+        return 1;
+    }
+
+    char lines[MAX_LINES][LINE_LEN];
+    int count = 0;
+    while (count < MAX_LINES && fgets(lines[count], LINE_LEN, in)) {
+        lines[count][strcspn(lines[count], "\r\n")] = '\0';
+        count++;
+    }
+    fclose(in);
+
+    int label = -1, cond = -1;
+    for (int i = 0; i < count; i++) {
+        if (strcmp(lines[i], "L1:") == 0) label = i;
+        if (strncmp(lines[i], "ifFalse ", 8) == 0) { cond = i; break; }
+    }
+
+    /* Move condition calculations from after L1 to before L1. */
+    char moved[MAX_LINES][LINE_LEN];
+    int moved_count = 0;
+    if (label >= 0 && cond > label + 1) {
+        for (int i = label + 1; i < cond; i++) {
+            if (strchr(lines[i], '=') != NULL) {
+                strcpy(moved[moved_count++], lines[i]);
+                lines[i][0] = '\0';
+            }
+        }
+    }
+
+    FILE *out = fopen("optimized.txt", "w");
+    if (!out) {
+        perror("Could not create optimized.txt");
+        return 1;
+    }
+
+    for (int i = 0; i < count; i++) {
+        if (i == label) {
+            for (int j = 0; j < moved_count; j++) {
+                fprintf(out, "%s\n", moved[j]);
+            }
+        }
+
+        if (lines[i][0] == '\0') continue;
+        constant_fold(lines[i]);
+        fprintf(out, "%s\n", lines[i]);
+    }
+
+    fclose(out);
+    printf("Optimization complete. Optimized TAC saved in optimized.txt\n");
     return 0;
 }
 
+EXPLANATION
+-----------
+Code motion moves a calculation that does not change inside the loop to a
+position before the loop label. Here n is not assigned in the loop, so n * 4
+can be calculated before L1. Constant folding evaluates expressions made only
+of constants, such as 16 * 5 = 80.
 
-SAMPLE INPUT
-------------
+The assignment r = t2 stays inside the loop; only the constant multiplication
+is folded to t2 = 80. This preserves the behavior if the loop executes zero
+times.
+
+PART (e) — TARGET CODE GENERATION
+=================================
+
+FILE NAME: codegen.c
+SAVE LOCATION: compiler_lab/codegen.c
+
+CODE
+----
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <ctype.h>
+
+/* Converts the optimized TAC into simple educational pseudo-assembly. */
+
+static int is_number(const char *s)
+{
+    if (*s == '-' && s[1]) s++;
+    if (!*s) return 0;
+    while (*s) {
+        if (!isdigit((unsigned char)*s)) return 0;
+        s++;
+    }
+    return 1;
+}
+
+static void load_value(FILE *out, const char *value)
+{
+    if (is_number(value))
+        fprintf(out, "    LOAD R0, #%s\n", value);
+    else
+        fprintf(out, "    LOAD R0, %s\n", value);
+}
+
+int main(void)
+{
+    FILE *in = fopen("optimized.txt", "r");
+    if (!in) {
+        perror("Could not open optimized.txt; run optimizer first");
+        return 1;
+    }
+
+    FILE *out = fopen("target.txt", "w");
+    if (!out) {
+        perror("Could not create target.txt");
+        fclose(in);
+        return 1;
+    }
+
+    char line[256];
+    while (fgets(line, sizeof(line), in)) {
+        line[strcspn(line, "\r\n")] = '\0';
+        if (line[0] == '\0') continue;
+
+        if (line[strlen(line)-1] == ':') {
+            fprintf(out, "%s\n", line);
+            continue;
+        }
+
+        if (strncmp(line, "goto ", 5) == 0) {
+            fprintf(out, "    JMP %s\n", line + 5);
+            continue;
+        }
+
+        if (strncmp(line, "ifFalse ", 8) == 0) {
+            char left[64], op[8], right[64], word[16], label[64];
+            if (sscanf(line, "%15s %63s %7s %63s %15s %63s",
+                       word, left, op, right, word, label) == 6) {
+                fprintf(out, "    CMP %s, %s\n", left, right);
+                fprintf(out, "    JGE %s\n", label);
+            } else {
+                fprintf(out, "    ; Could not parse condition: %s\n", line);
+            }
+            continue;
+        }
+
+        char lhs[64], rhs[64], a[64], op[8], b[64];
+        char *eq = strchr(line, '=');
+        if (!eq) {
+            fprintf(out, "    ; Unrecognized TAC: %s\n", line);
+            continue;
+        }
+
+        size_t n = (size_t)(eq - line);
+        if (n >= sizeof(lhs)) n = sizeof(lhs) - 1;
+        memcpy(lhs, line, n);
+        lhs[n] = '\0';
+        while (n > 0 && isspace((unsigned char)lhs[n-1])) lhs[--n] = '\0';
+
+        if (sscanf(eq + 1, " %63s %7s %63s", a, op, b) == 3) {
+            load_value(out, a);
+            if (strcmp(op, "+") == 0) fprintf(out, "    ADD R0, %s\n", b);
+            else if (strcmp(op, "-") == 0) fprintf(out, "    SUB R0, %s\n", b);
+            else if (strcmp(op, "*") == 0) fprintf(out, "    MUL R0, %s\n", b);
+            else if (strcmp(op, "/") == 0) fprintf(out, "    DIV R0, %s\n", b);
+            fprintf(out, "    STORE %s, R0\n", lhs);
+        } else if (sscanf(eq + 1, " %63s", rhs) == 1) {
+            load_value(out, rhs);
+            fprintf(out, "    STORE %s, R0\n", lhs);
+        }
+    }
+
+    fclose(in);
+    fclose(out);
+    printf("Target code generated in target.txt\n");
+    return 0;
+}
+
+EXPLANATION
+-----------
+The backend reads optimized TAC and converts operations into simple pseudo-
+assembly instructions:
+- LOAD places a value in register R0.
+- ADD, SUB, MUL, DIV perform arithmetic.
+- STORE writes the result to a variable or temporary.
+- CMP compares the loop condition.
+- JGE jumps when m >= t1, which is equivalent to the loop condition m < t1
+  being false for integer values.
+- JMP performs an unconditional jump.
+This is educational pseudo-assembly; real instruction names depend on the
+target processor.
+
+PART (f) — INPUT FILE, COMPILATION, INTEGRATION, AND TESTING
+===========================================================
+
+FILE NAME: input.txt
+SAVE LOCATION: compiler_lab/input.txt
+
+CODE
+----
 while (m < n * 4)
 {
     r = 16 * 5;
@@ -275,153 +505,150 @@ while (m < n * 4)
     t = m + s;
 }
 
+HOW TO RUN (LINUX / UBUNTU / WSL)
+---------------------------------
+Open a terminal in the compiler_lab folder.
 
-EXPECTED OUTPUT FOR THE SAMPLE (CONCEPTUAL / EXAM OUTPUT)
----------------------------------------------------------
-Syntax is correct.
+1. Install the required tools if they are not already installed:
+       sudo apt update
+       sudo apt install flex bison gcc
 
-THREE-ADDRESS CODE (TAC)
-1. L1:
-2. t1 = n * 4
-3. ifFalse m < t1 goto L2
-4. t2 = 16 * 5
-5. t3 = x * y
-6. t4 = t3 + z
-7. s = t4
-8. t5 = m + s
-9. t = t5
-10. goto L1
-11. L2:
+2. Generate the parser source and header:
+       bison -d parser.y
 
-OPTIMIZED TAC (CODE MOTION + CONSTANT FOLDING)
-1. t1 = n * 4
-2. t2 = 80
-3. L1:
-4. ifFalse m < t1 goto L2
-5. t3 = x * y
-6. t4 = t3 + z
-7. s = t4
-8. t5 = m + s
-9. t = t5
-10. goto L1
-11. L2:
+3. Generate the lexer source:
+       flex lex.l
 
-TARGET CODE (ILLUSTRATIVE PSEUDO-ASSEMBLY)
-MOV R1, n
-MUL R1, #4
-MOV R2, R1
-MOV R3, #80
+4. Compile the lexer and parser into the compiler executable:
+       gcc parser.tab.c lex.yy.c -o compiler
+
+   If your system reports an unresolved yywrap or Flex library error, use:
+       gcc parser.tab.c lex.yy.c -o compiler -lfl
+
+5. Run the compiler using the input file:
+       ./compiler < input.txt
+
+   Expected terminal message:
+       Syntax is valid. TAC generated in tac.txt
+
+6. Compile the optimizer:
+       gcc optimizer.c -o optimizer
+
+7. Run the optimizer:
+       ./optimizer
+
+   Expected terminal message:
+       Optimization complete. Optimized TAC saved in optimized.txt
+
+8. Compile the target-code generator:
+       gcc codegen.c -o codegen
+
+9. Run target-code generation:
+       ./codegen
+
+   Expected terminal message:
+       Target code generated in target.txt
+
+10. View the generated files:
+       cat tac.txt
+       cat optimized.txt
+       cat target.txt
+
+WINDOWS NOTE
+------------
+Use WSL or an environment with Flex, Bison, and GCC installed. If using a
+Windows terminal configured with these tools, executable names may be
+compiler.exe, optimizer.exe, and codegen.exe. The equivalent input redirection
+is:
+       compiler.exe < input.txt
+
+EXPECTED OUTPUT FOR PART (a)
+----------------------------
+LEX recognizes the following tokens in the input:
+WHILE, '(', ID(m), LT, ID(n), MUL, NUMBER(4), ')', '{',
+ID(r), ASSIGN, NUMBER(16), MUL, NUMBER(5), ';',
+ID(s), ASSIGN, ID(x), MUL, ID(y), PLUS, ID(z), ';',
+ID(t), ASSIGN, ID(m), PLUS, ID(s), ';', '}'
+
+The lexer passes tokens to YACC; it does not print this list in this implementation.
+
+EXPECTED OUTPUT FOR PART (b)
+----------------------------
+The parser accepts the supplied program and the terminal displays:
+Syntax is valid. TAC generated in tac.txt
+
+If the syntax is invalid, YACC reports a syntax error.
+
+EXPECTED OUTPUT FOR PART (c): tac.txt
+-------------------------------------
 L1:
-MOV R4, m
-CMP R4, R2
-JGE L2
-MOV R5, x
-MUL R5, y
-ADD R5, z
-MOV s, R5
-MOV R6, m
-ADD R6, s
-MOV t, R6
-JMP L1
+t1 = n * 4
+ifFalse m < t1 goto L2
+t2 = 16 * 5
+r = t2
+t3 = x * y
+t4 = t3 + z
+s = t4
+t5 = m + s
+t = t5
+goto L1
 L2:
 
+EXPECTED OUTPUT FOR PART (d): optimized.txt
+-------------------------------------------
+t1 = n * 4
+L1:
+ifFalse m < t1 goto L2
+t2 = 80
+r = t2
+t3 = x * y
+t4 = t3 + z
+s = t4
+t5 = m + s
+t = t5
+goto L1
+L2:
 
-HOW TO COMPILE THE LEX/YACC PROGRAM
------------------------------------
-Requirements: Flex and Bison (or Lex and Yacc), plus GCC.
+EXPECTED OUTPUT FOR PART (e): target.txt
+----------------------------------------
+The file contains pseudo-assembly instructions equivalent to the optimized TAC.
+For example, the first lines should be:
+    LOAD R0, n
+    MUL R0, 4
+    STORE t1, R0
+L1:
+    CMP m, t1
+    JGE L2
 
-Using Flex + Bison:
-    bison -d compiler.y
-    flex compiler.l
-    gcc compiler.tab.c lex.yy.c -o compiler
-    ./compiler < input.txt
+The rest of the file translates the assignments and arithmetic operations into
+LOAD, arithmetic, STORE, JMP, and label instructions. Exact formatting follows
+codegen.c.
 
-Create input.txt containing the sample input above.
+WHAT TO WRITE IN THE EXAM — SHORT THEORY
+----------------------------------------
+(a) LEX specification: recognizes keywords, identifiers, constants, operators,
+    delimiters, and ignores whitespace.
+(b) YACC specification: defines grammar productions for a while loop,
+    statement lists, assignments, and arithmetic expressions.
+(c) Syntax-directed translation: semantic actions create temporary variables
+    and emit TAC instructions.
+(d) Code motion: moves loop-invariant calculation n * 4 before L1. Constant
+    folding also replaces 16 * 5 with 80.
+(e) Target-code generation: translates optimized TAC into pseudo-assembly.
+(f) Integration: Flex generates lex.yy.c; Bison generates parser.tab.c and
+    parser.tab.h; GCC compiles them; the compiler generates tac.txt; optimizer
+    generates optimized.txt; codegen generates target.txt.
 
-If your system has traditional YACC/LEX instead:
-    yacc -d compiler.y
-    lex compiler.l
-    gcc y.tab.c lex.yy.c -o compiler
-    ./compiler < input.txt
+TROUBLESHOOTING
+---------------
+- "bison: command not found": install Bison.
+- "flex: command not found": install Flex.
+- "gcc: command not found": install GCC.
+- "parser.tab.h not found": run `bison -d parser.y` before `flex lex.l`.
+- "compiler cannot open tac.txt": run the parser/compiler first.
+- "optimizer cannot open tac.txt": run `./compiler < input.txt` first.
+- Always run commands from the compiler_lab directory so generated files are
+  created in the expected location.
 
-Depending on the system, you may need:
-    gcc compiler.tab.c lex.yy.c -o compiler -lfl
-or:
-    gcc y.tab.c lex.yy.c -o compiler -ll
-
-Important practical note:
-The source above is an exam-oriented teaching template. The TAC printed by the parser is produced from semantic actions; the optimized TAC and target-code sections are deliberately hard-coded for the exact sample to keep the code-motion pass easy to explain. In a fully general compiler, optimization and code generation would read the TAC array and transform/translate each instruction programmatically. Also, the provided grammar supports the requested while loop, assignments, arithmetic expressions, and the '<' condition used in the sample.
-
-
-EXAM ANSWER POINTS
-------------------
-(a) LEX: recognizes keywords, identifiers, constants, operators, delimiters.
-(b) YACC: grammar rules validate statement structure and expression precedence.
-(c) SDT: semantic actions create temporary names t1, t2, ... and emit TAC.
-(d) Code motion: move computations that do not change inside the loop to before the loop.
-    Here n*4 is loop invariant if n is not modified in the loop; 16*5 is constant.
-    Constant folding changes 16*5 into 80.
-(e) Back end: map TAC operations to target instructions such as MOV, MUL, ADD, CMP, and jumps.
-(f) Integration: lexer supplies tokens to parser; parser checks syntax and emits TAC; optimizer transforms TAC; back end emits target code.
-
-VIVA QUESTIONS WITH SHORT ANSWERS
----------------------------------
-1. What is a compiler?
-   A program that translates source code into target code.
-
-2. What is the front end?
-   The part that performs lexical analysis, syntax analysis, and often semantic analysis/intermediate-code generation.
-
-3. What does LEX do?
-   It groups characters into tokens such as ID, NUMBER, WHILE, and operators.
-
-4. What does YACC do?
-   It checks whether the token sequence follows the grammar.
-
-5. What is a token?
-   A category of lexeme, such as ID for m or NUMBER for 16.
-
-6. What is a lexeme?
-   The actual character sequence, such as "while", "m", or "16".
-
-7. What is a semantic action?
-   C code inside a grammar rule that runs when the rule is reduced.
-
-8. What is three-address code?
-   An intermediate representation where each instruction has at most one operator, e.g. t1 = n * 4.
-
-9. Why use temporary variables?
-   To break complex expressions into simple operations.
-
-10. What is code motion?
-    Moving a computation to a place where it executes fewer times without changing program meaning.
-
-11. Why can n*4 move outside this loop?
-    Because n is not assigned inside the loop, so its value stays unchanged during loop iterations.
-
-12. Why can 16*5 be optimized?
-    Both operands are constants; constant folding evaluates it at compile time as 80.
-
-13. Can x*y+z be moved outside?
-    Not safely in general because x, y, and z could be changed by loop statements in a larger program. In this exact body they are not assigned, but the basic conservative explanation is to leave it inside unless invariance is established.
-
-14. What is target code?
-    The lower-level instructions produced by the back end.
-
-15. What is a symbol table?
-    A compiler structure that stores identifier information, such as name, type, and scope.
-
-16. What is a label?
-    A named jump destination, e.g. L1 or L2.
-
-17. What is the difference between lexical and syntax errors?
-    Lexical errors involve invalid character/token patterns; syntax errors violate grammar rules.
-
-18. What does yyerror() do?
-    Reports a parsing error.
-
-19. What is a basic block?
-    A straight-line sequence of instructions with one entry and one exit.
-
-20. What is the limitation of this exam implementation?
-    The optimization and backend output are hard-coded for this exact sample; a production compiler would transform and translate arbitrary TAC instructions programmatically.
+END OF ANSWER
+=============
