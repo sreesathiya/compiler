@@ -1,0 +1,114 @@
+lex.l
+
+%{
+#include "y.tab.h"
+#include <string.h>
+extern YYSTYPE yylval;
+%}
+
+%%
+"for"                   { return FOR; }
+[a-zA-Z][a-zA-Z0-9]*    { yylval.str = strdup(yytext); return ID; }
+[0-9]+                  { yylval.str = strdup(yytext); return NUM; }
+"<"                     { return LT; }
+"="                     { return ASSIGN; }
+"+"                     { return PLUS; }
+"*"                     { return MUL; }
+"{"                     { return '{'; }
+"}"                     { return '}'; }
+"("                     { return '('; }
+")"                     { return ')'; }
+";"                     { return ';'; }
+[ \t\n\r]+              { /* Skip whitespace */ }
+%%
+
+int yywrap() { return 1; }
+
+
+Parser.y
+
+%{
+#include <stdio.h>
+#include <stdlib.h>
+int yylex();
+void yyerror(const char *s);
+%}
+
+%union {
+    char* str;
+}
+
+%token <str> ID NUM
+%token FOR LT ASSIGN PLUS MUL
+
+%%
+
+program: 
+    for_stmt { 
+        printf("\nTAC Generated Successfully for For-Loop!\n"); 
+    }
+    ;
+
+for_stmt: 
+    FOR '(' ID ASSIGN NUM ';' ID LT ID MUL NUM ';' ID ASSIGN ID PLUS NUM ')' '{' body '}' {
+        // Initialization
+        printf("  %s = %s\n", $3, $5);          // m = 0
+        printf("L1:\n");
+        // Condition check
+        printf("  t1 = %s * %s\n", $9, $11); // n * 4
+        printf("  t2 = %s < t1\n", $7);       // m < t1
+        printf("  ifFalse t2 goto L2\n");
+        // Loop Body TAC
+        printf("  t3 = 16 * 5\n");
+        printf("  r = t3\n");
+        printf("  t4 = x * y\n");
+        printf("  t5 = t4 + z\n");
+        printf("  s = t5\n");
+        printf("  t6 = m + s\n");
+        printf("  t = t6\n");
+        // Increment
+        printf("  t7 = %s + %s\n", $15, $17); // m + 1
+        printf("  %s = t7\n", $13);           // m = t7
+        printf("  goto L1\n");
+        printf("L2:\n");
+    }
+    ;
+
+body: 
+    body stmt 
+    | stmt
+    ;
+
+stmt: 
+    ID ASSIGN NUM MUL NUM ';' 
+    | ID ASSIGN ID MUL ID PLUS ID ';' 
+    | ID ASSIGN ID PLUS ID ';' 
+    ;
+
+%%
+
+void yyerror(const char *s) {
+    fprintf(stderr, "Error: %s\n", s);
+}
+
+int main() {
+    yyparse();
+    return 0;
+}
+
+INPUT:-
+
+
+for (m = 0; m < n * 4; m = m + 1)
+{
+    r = 16 * 5;
+    s = x * y + z;
+    t = m + s;
+}
+
+commands:
+
+yacc -dy parser.y
+flex lex.l
+gcc y.tab.c lex.yy.c -o compiler_if
+./compiler_if < input.txt

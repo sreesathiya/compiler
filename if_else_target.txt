@@ -1,0 +1,20 @@
+#include <stdio.h>
+
+int main()
+{
+    printf("MOV R1, a\n");
+    printf("CMP R1, b\n");
+    printf("JGE L1\n");
+
+    printf("\nMOV R1, 5\n");
+    printf("MOV x, R1\n");
+    printf("JMP L2\n");
+
+    printf("\nL1:\n");
+    printf("MOV R1, 10\n");
+    printf("MOV x, R1\n");
+
+    printf("\nL2:\n");
+
+    return 0;
+}

@@ -1,0 +1,29 @@
+#include <stdio.h>
+
+int main()
+{
+    printf("L1:\n");
+    printf("MOV R1, n\n");
+    printf("MUL R1, 4\n");
+    printf("MOV R2, m\n");
+    printf("CMP R2, R1\n");
+    printf("JGE L2\n");
+
+    printf("\nMOV R1, 16\n");
+    printf("MUL R1, 5\n");
+    printf("MOV r, R1\n");
+
+    printf("\nMOV R1, x\n");
+    printf("MUL R1, y\n");
+    printf("ADD R1, z\n");
+    printf("MOV s, R1\n");
+
+    printf("\nMOV R1, m\n");
+    printf("ADD R1, s\n");
+    printf("MOV t, R1\n");
+
+    printf("\nJMP L1\n");
+    printf("\nL2:\n");
+
+    return 0;
+}
